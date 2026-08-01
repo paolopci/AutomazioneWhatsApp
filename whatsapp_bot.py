@@ -4,7 +4,11 @@ import random
 import time
 from dataclasses import dataclass
 from selenium import webdriver
-from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -380,24 +384,34 @@ def esegui_invio_immagine(driver, destinazione, storico, percorso_storico):
 
 
 def main():
-    driver = configura_browser()
-    driver.get("https://whatsapp.com")
-    accedi_a_whatsapp_web(driver)
+    driver = None
+    try:
+        storico = carica_storico(PERCORSO_STORICO)
+        driver = configura_browser()
+        driver.get("https://whatsapp.com")
+        accedi_a_whatsapp_web(driver)
+        print("Attesa del caricamento di WhatsApp Web...")
 
-    print(
-        "\n[ATTENZIONE] Se è la prima volta, scansiona il codice QR sul browser aperto."
-    )
-    print("Se hai già fatto l'accesso, attendi il caricamento della pagina.\n")
+        if not cerca_e_seleziona_chat(driver, GRUPPO_SORGENTE):
+            return
 
-    # 1. Va nel gruppo sorgente
-    if cerca_e_seleziona_chat(driver, GRUPPO_SORGENTE):
-        time.sleep(2)
-        # 2. Prende l'ultimo elemento (testo o immagine) e lo inoltra al gruppo destinazione
-        inoltra_ultimo_messaggio(driver, GRUPPO_DESTINAZIONE)
-
-    print("Procedura completata. Chiusura del browser tra 5 secondi...")
-    time.sleep(5)
-    driver.quit()
+        if esegui_invio_immagine(
+            driver,
+            GRUPPO_DESTINAZIONE,
+            storico,
+            PERCORSO_STORICO,
+        ):
+            print(
+                f"Invio eseguito: una nuova immagine da '{GRUPPO_SORGENTE}' "
+                f"è stata inviata a '{GRUPPO_DESTINAZIONE}'."
+            )
+    except (RuntimeError, ValueError, WebDriverException) as errore:
+        print(f"Invio non eseguito: {errore}")
+    finally:
+        if driver is not None:
+            print("Chiusura del browser tra 5 secondi...")
+            time.sleep(5)
+            driver.quit()
 
 
 if __name__ == "__main__":

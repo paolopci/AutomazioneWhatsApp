@@ -1,13 +1,16 @@
 import json
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import Mock, call, patch
 
 from selenium.webdriver.common.by import By
 
 from whatsapp_bot import (
     CandidatoImmagine,
+    PERCORSO_STORICO,
     carica_storico,
     crea_selettore_destinazione,
     esegui_invio_immagine,
@@ -17,6 +20,7 @@ from whatsapp_bot import (
     salva_storico,
     scegli_candidato,
     trova_immagini_nei_messaggi,
+    main,
 )
 
 
@@ -50,6 +54,101 @@ class OrchestrazioneInvioTests(unittest.TestCase):
         self.assertTrue(esito)
         inoltra.assert_called_once_with(driver, candidato.messaggio, "Destinazione")
         registra.assert_called_once_with("storico.json", [], "f" * 64)
+
+
+class MainTests(unittest.TestCase):
+    @patch("whatsapp_bot.time.sleep")
+    @patch("whatsapp_bot.esegui_invio_immagine")
+    @patch("whatsapp_bot.cerca_e_seleziona_chat", return_value=True)
+    @patch("whatsapp_bot.accedi_a_whatsapp_web")
+    @patch("whatsapp_bot.configura_browser")
+    @patch("whatsapp_bot.carica_storico")
+    def test_stampa_successo_dopo_conferma_invio_e_registrazione_storico(
+        self,
+        carica_storico,
+        configura_browser,
+        accedi,
+        cerca_chat,
+        esegui_invio,
+        sleep,
+    ):
+        storico = ["a" * 64]
+        driver = Mock()
+        carica_storico.return_value = storico
+        configura_browser.return_value = driver
+
+        def invio_confermato(*_):
+            print("Conferma UI ricevuta e storico registrato.")
+            return True
+
+        esegui_invio.side_effect = invio_confermato
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main()
+
+        messaggi = output.getvalue()
+        self.assertIn("Conferma UI ricevuta e storico registrato.", messaggi)
+        self.assertLess(
+            messaggi.index("Conferma UI ricevuta e storico registrato."),
+            messaggi.index("Invio eseguito:"),
+        )
+        carica_storico.assert_called_once()
+        driver.get.assert_called_once_with("https://whatsapp.com")
+        accedi.assert_called_once_with(driver)
+        cerca_chat.assert_called_once_with(driver, "Rosario")
+        esegui_invio.assert_called_once_with(
+            driver, "Destinazione", storico, PERCORSO_STORICO
+        )
+        sleep.assert_called_once_with(5)
+        driver.quit.assert_called_once_with()
+
+    @patch("whatsapp_bot.time.sleep")
+    @patch("whatsapp_bot.esegui_invio_immagine", return_value=False)
+    @patch("whatsapp_bot.cerca_e_seleziona_chat", return_value=True)
+    @patch("whatsapp_bot.accedi_a_whatsapp_web")
+    @patch("whatsapp_bot.configura_browser")
+    @patch("whatsapp_bot.carica_storico", return_value=[])
+    def test_non_stampa_successo_quando_non_esegue_invio(
+        self,
+        carica_storico,
+        configura_browser,
+        accedi,
+        cerca_chat,
+        esegui_invio,
+        sleep,
+    ):
+        driver = Mock()
+        configura_browser.return_value = driver
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main()
+
+        self.assertNotIn("Invio eseguito:", output.getvalue())
+        esegui_invio.assert_called_once_with(
+            driver, "Destinazione", [], PERCORSO_STORICO
+        )
+        sleep.assert_called_once_with(5)
+        driver.quit.assert_called_once_with()
+
+    @patch("whatsapp_bot.time.sleep")
+    @patch("whatsapp_bot.accedi_a_whatsapp_web", side_effect=RuntimeError("accesso"))
+    @patch("whatsapp_bot.configura_browser")
+    @patch("whatsapp_bot.carica_storico", return_value=[])
+    def test_chiude_il_browser_e_comunica_errore_se_l_accesso_fallisce(
+        self, carica_storico, configura_browser, accedi, sleep
+    ):
+        driver = Mock()
+        configura_browser.return_value = driver
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            main()
+
+        self.assertIn("Invio non eseguito: accesso", output.getvalue())
+        sleep.assert_called_once_with(5)
+        driver.quit.assert_called_once_with()
 
 
 class SelettoreDestinazioneTests(unittest.TestCase):
