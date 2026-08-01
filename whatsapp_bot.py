@@ -242,15 +242,25 @@ def scegli_candidato(candidati, storico, scelta=random.choice):
 def trova_immagini_nei_messaggi(driver):
     risultati = []
     for messaggio in driver.find_elements(By.XPATH, SELETTORE_RIGHE_MESSAGGIO):
-        for immagine in messaggio.find_elements(By.XPATH, ".//img"):
-            if not immagine.is_displayed():
-                continue
-            alt = (immagine.get_attribute("alt") or "").casefold()
-            larghezza, altezza = driver.execute_script(
-                "return [arguments[0].naturalWidth, arguments[0].naturalHeight];",
-                immagine,
-            )
-            if "sticker" in alt or min(larghezza or 0, altezza or 0) < 120:
+        try:
+            immagini = messaggio.find_elements(By.XPATH, ".//img")
+        except (StaleElementReferenceException, TimeoutException) as errore:
+            print(f"Messaggio ignorato durante la scansione: {errore}")
+            continue
+
+        for immagine in immagini:
+            try:
+                if not immagine.is_displayed():
+                    continue
+                alt = (immagine.get_attribute("alt") or "").casefold()
+                larghezza, altezza = driver.execute_script(
+                    "return [arguments[0].naturalWidth, arguments[0].naturalHeight];",
+                    immagine,
+                )
+                if "sticker" in alt or min(larghezza or 0, altezza or 0) < 120:
+                    continue
+            except (StaleElementReferenceException, TimeoutException) as errore:
+                print(f"Immagine ignorata durante la scansione: {errore}")
                 continue
             risultati.append((messaggio, immagine))
     return risultati

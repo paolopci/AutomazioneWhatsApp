@@ -489,6 +489,37 @@ class DriverFinto:
 
 
 class ScansioneImmaginiTests(unittest.TestCase):
+    def _crea_scenario_con_errore_transitorio(self, fase, errore):
+        prima_immagine = Mock(name="prima_immagine")
+        prima_immagine.is_displayed.return_value = True
+        prima_immagine.get_attribute.return_value = "Foto"
+        primo_messaggio = Mock(name="primo_messaggio")
+        primo_messaggio.find_elements.return_value = [prima_immagine]
+
+        immagine_valida = Mock(name="immagine_valida")
+        immagine_valida.is_displayed.return_value = True
+        immagine_valida.get_attribute.return_value = "Foto"
+        messaggio_valido = Mock(name="messaggio_valido")
+        messaggio_valido.find_elements.return_value = [immagine_valida]
+
+        driver = Mock(name="driver")
+        driver.find_elements.return_value = [primo_messaggio, messaggio_valido]
+
+        if fase == "messaggio.find_elements":
+            primo_messaggio.find_elements.side_effect = errore
+        elif fase == "is_displayed":
+            prima_immagine.is_displayed.side_effect = errore
+        elif fase == "get_attribute":
+            prima_immagine.get_attribute.side_effect = errore
+
+        def leggi_dimensioni(_, immagine):
+            if fase == "dimensioni" and immagine is prima_immagine:
+                raise errore
+            return [120, 120]
+
+        driver.execute_script.side_effect = leggi_dimensioni
+        return driver, messaggio_valido, immagine_valida
+
     def test_include_immagine_visibile_con_dimensioni_naturali_idonee(self):
         immagine = ImmagineFinta(True, "Foto", 120, 120)
         messaggio = MessaggioFinto([immagine])
@@ -520,6 +551,58 @@ class ScansioneImmaginiTests(unittest.TestCase):
         risultati = trova_immagini_nei_messaggi(DriverFinto([messaggio]))
 
         self.assertEqual([], risultati)
+
+    def test_stale_in_ogni_fase_ignora_elemento_e_prosegue(self):
+        fasi = (
+            "messaggio.find_elements",
+            "is_displayed",
+            "get_attribute",
+            "dimensioni",
+        )
+
+        for fase in fasi:
+            with self.subTest(fase=fase):
+                driver, messaggio_valido, immagine_valida = (
+                    self._crea_scenario_con_errore_transitorio(
+                        fase,
+                        StaleElementReferenceException(f"stale in {fase}"),
+                    )
+                )
+
+                try:
+                    with redirect_stdout(io.StringIO()):
+                        risultati = trova_immagini_nei_messaggi(driver)
+                except StaleElementReferenceException as errore:
+                    self.fail(f"Stale propagato dalla fase {fase}: {errore}")
+
+                self.assertEqual([(messaggio_valido, immagine_valida)], risultati)
+
+    def test_timeout_per_messaggio_o_immagine_non_blocca_i_successivi(self):
+        for fase in ("messaggio.find_elements", "dimensioni"):
+            with self.subTest(fase=fase):
+                driver, messaggio_valido, immagine_valida = (
+                    self._crea_scenario_con_errore_transitorio(
+                        fase,
+                        TimeoutException(f"timeout in {fase}"),
+                    )
+                )
+
+                try:
+                    with redirect_stdout(io.StringIO()):
+                        risultati = trova_immagini_nei_messaggi(driver)
+                except TimeoutException as errore:
+                    self.fail(f"Timeout propagato dalla fase {fase}: {errore}")
+
+                self.assertEqual([(messaggio_valido, immagine_valida)], risultati)
+
+    def test_webdriver_exception_generico_della_scansione_viene_propagato(self):
+        driver, _, _ = self._crea_scenario_con_errore_transitorio(
+            "get_attribute",
+            WebDriverException("sessione terminata"),
+        )
+
+        with self.assertRaisesRegex(WebDriverException, "sessione terminata"):
+            trova_immagini_nei_messaggi(driver)
 
 
 class RaccoltaCandidatiTests(unittest.TestCase):
