@@ -12,7 +12,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- CONFIGURAZIONE ---
 # Inserisci i nomi ESATTI come appaiono nella tua lista chat di WhatsApp
-GRUPPO_SORGENTE = "Sorgente"
+GRUPPO_SORGENTE = "Rosario"
 GRUPPO_DESTINAZIONE = "Destinazione"
 
 # Percorso della cartella del profilo creata al Passo 1
