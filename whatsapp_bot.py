@@ -4,7 +4,7 @@ import random
 import time
 from dataclasses import dataclass
 from selenium import webdriver
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -23,6 +23,7 @@ PERCORSO_PROFILO = os.path.join(BASE_DIR, "ProfiloChrome")
 PERCORSO_STORICO = os.path.join(BASE_DIR, "storico_invii.json")
 VERSIONE_STORICO = 1
 MAX_STORICO = 7
+MAX_SCORRIMENTI = 20
 
 # WhatsApp Web cambia spesso struttura interna: la ricerca e identificata
 # dall'etichetta accessibile, non dall'ordine o da attributi temporanei.
@@ -32,6 +33,10 @@ SELETTORE_ACCESSO = (
     'normalize-space()="Accedi" or normalize-space()="Log in" '
     'or .//*[normalize-space()="Accedi" or normalize-space()="Log in"]]'
 )
+SELETTORE_RIGHE_MESSAGGIO = (
+    '//div[@role="row"][.//div[@data-pre-plain-text] and .//img]'
+)
+SELETTORE_RIGHE_CRONOLOGIA = '//div[@role="row"][.//div[@data-pre-plain-text]]'
 
 
 @dataclass(frozen=True)
@@ -131,6 +136,76 @@ def scegli_candidato(candidati, storico, scelta=random.choice):
         impronte_viste.add(candidato.impronta)
         idonei.append(candidato)
     return scelta(idonei) if idonei else None
+
+
+def trova_immagini_nei_messaggi(driver):
+    risultati = []
+    for messaggio in driver.find_elements(By.XPATH, SELETTORE_RIGHE_MESSAGGIO):
+        for immagine in messaggio.find_elements(By.XPATH, ".//img"):
+            if not immagine.is_displayed():
+                continue
+            alt = (immagine.get_attribute("alt") or "").casefold()
+            larghezza, altezza = driver.execute_script(
+                "return [arguments[0].naturalWidth, arguments[0].naturalHeight];",
+                immagine,
+            )
+            if "sticker" in alt or min(larghezza or 0, altezza or 0) < 120:
+                continue
+            risultati.append((messaggio, immagine))
+    return risultati
+
+
+def scorri_cronologia_verso_alto(driver):
+    righe = driver.find_elements(By.XPATH, SELETTORE_RIGHE_CRONOLOGIA)
+    if not righe:
+        return False
+    stato_precedente = (righe[0].id, len(righe))
+    spostato = driver.execute_script(
+        """
+        let elemento = arguments[0];
+        while (elemento && elemento.scrollHeight <= elemento.clientHeight) {
+            elemento = elemento.parentElement;
+        }
+        if (!elemento) return false;
+        const prima = elemento.scrollTop;
+        elemento.scrollTop = Math.max(0, prima - elemento.clientHeight * 0.8);
+        return elemento.scrollTop !== prima;
+        """,
+        righe[0],
+    )
+    if not spostato:
+        return False
+
+    def cronologia_cambiata(current_driver):
+        righe_correnti = current_driver.find_elements(
+            By.XPATH, SELETTORE_RIGHE_CRONOLOGIA
+        )
+        if not righe_correnti:
+            return False
+        return (righe_correnti[0].id, len(righe_correnti)) != stato_precedente
+
+    try:
+        WebDriverWait(driver, 5).until(cronologia_cambiata)
+    except TimeoutException:
+        return False
+    return True
+
+
+def raccogli_candidati(driver, storico, max_scorrimenti=MAX_SCORRIMENTI):
+    for _ in range(max_scorrimenti + 1):
+        candidati = []
+        for messaggio, immagine in trova_immagini_nei_messaggi(driver):
+            try:
+                impronta = calcola_impronta_immagine(driver, immagine)
+            except RuntimeError as errore:
+                print(f"Immagine ignorata: {errore}")
+                continue
+            candidati.append(CandidatoImmagine(messaggio, immagine, impronta))
+        if scegli_candidato(candidati, storico) is not None:
+            return candidati
+        if not scorri_cronologia_verso_alto(driver):
+            break
+    return []
 
 
 def configura_browser():
