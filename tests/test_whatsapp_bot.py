@@ -3,7 +3,13 @@ import os
 import tempfile
 import unittest
 
-from whatsapp_bot import carica_storico, registra_invio, salva_storico
+from whatsapp_bot import (
+    CandidatoImmagine,
+    carica_storico,
+    registra_invio,
+    salva_storico,
+    scegli_candidato,
+)
 
 
 class StoricoInviiTests(unittest.TestCase):
@@ -38,3 +44,28 @@ class StoricoInviiTests(unittest.TestCase):
     def test_hash_non_valido_viene_rifiutato(self):
         with self.assertRaisesRegex(ValueError, "impronta SHA-256 non valida"):
             salva_storico(self.percorso, ["abc"])
+
+
+class SceltaImmagineTests(unittest.TestCase):
+    def test_esclude_hash_presenti_nello_storico_e_duplicati_correnti(self):
+        gia_inviata = "a" * 64
+        nuova = "b" * 64
+        candidati = [
+            CandidatoImmagine("m1", "i1", gia_inviata),
+            CandidatoImmagine("m2", "i2", nuova),
+            CandidatoImmagine("m3", "i3", nuova),
+        ]
+        ricevuti = []
+
+        def prima_opzione(opzioni):
+            ricevuti.extend(opzioni)
+            return opzioni[0]
+
+        scelto = scegli_candidato(candidati, [gia_inviata], prima_opzione)
+        self.assertEqual(nuova, scelto.impronta)
+        self.assertEqual(1, len(ricevuti))
+
+    def test_restituisce_none_quando_tutti_i_contenuti_sono_recenti(self):
+        impronta = "c" * 64
+        candidati = [CandidatoImmagine("m1", "i1", impronta)]
+        self.assertIsNone(scegli_candidato(candidati, [impronta]))

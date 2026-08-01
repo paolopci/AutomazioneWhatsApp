@@ -1,6 +1,8 @@
 import json
 import os
+import random
 import time
+from dataclasses import dataclass
 from selenium import webdriver
 from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.chrome.service import Service
@@ -30,6 +32,13 @@ SELETTORE_ACCESSO = (
     'normalize-space()="Accedi" or normalize-space()="Log in" '
     'or .//*[normalize-space()="Accedi" or normalize-space()="Log in"]]'
 )
+
+
+@dataclass(frozen=True)
+class CandidatoImmagine:
+    messaggio: object
+    immagine: object
+    impronta: str
 
 
 def _valida_impronte(impronte):
@@ -85,6 +94,45 @@ def registra_invio(percorso, storico, impronta):
     return aggiornato
 
 
+def calcola_impronta_immagine(driver, immagine):
+    risultato = driver.execute_async_script(
+        """
+        const immagine = arguments[0];
+        const completa = arguments[arguments.length - 1];
+        (async () => {
+            const url = immagine.currentSrc || immagine.src;
+            const risposta = await fetch(url);
+            if (!risposta.ok) throw new Error(`HTTP ${risposta.status}`);
+            const contenuto = await risposta.arrayBuffer();
+            const digest = await crypto.subtle.digest('SHA-256', contenuto);
+            const impronta = Array.from(new Uint8Array(digest))
+                .map(byte => byte.toString(16).padStart(2, '0'))
+                .join('');
+            completa({ok: true, impronta});
+        })().catch(errore => completa({ok: false, errore: String(errore)}));
+        """,
+        immagine,
+    )
+    if not risultato or not risultato.get("ok"):
+        dettaglio = (risultato or {}).get("errore", "risposta assente")
+        raise RuntimeError(f"Impossibile leggere l'immagine: {dettaglio}")
+    impronta = risultato.get("impronta", "")
+    _valida_impronte([impronta])
+    return impronta
+
+
+def scegli_candidato(candidati, storico, scelta=random.choice):
+    recenti = set(storico)
+    impronte_viste = set()
+    idonei = []
+    for candidato in candidati:
+        if candidato.impronta in recenti or candidato.impronta in impronte_viste:
+            continue
+        impronte_viste.add(candidato.impronta)
+        idonei.append(candidato)
+    return scelta(idonei) if idonei else None
+
+
 def configura_browser():
     options = Options()
     # Utilizza una cartella dati personalizzata per salvare il login di WhatsApp
@@ -97,6 +145,7 @@ def configura_browser():
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
+    driver.set_script_timeout(15)
     return driver
 
 
