@@ -7,12 +7,44 @@ from unittest.mock import Mock, patch
 from whatsapp_bot import (
     CandidatoImmagine,
     carica_storico,
+    esegui_invio_immagine,
+    inoltra_messaggio,
     registra_invio,
     raccogli_candidati,
     salva_storico,
     scegli_candidato,
     trova_immagini_nei_messaggi,
 )
+
+
+class OrchestrazioneInvioTests(unittest.TestCase):
+    @patch("whatsapp_bot.registra_invio")
+    @patch("whatsapp_bot.inoltra_messaggio", return_value=False)
+    @patch("whatsapp_bot.raccogli_candidati")
+    def test_non_registra_se_inoltro_non_confermato(
+        self, raccogli, inoltra, registra
+    ):
+        candidato = CandidatoImmagine("messaggio", "immagine", "e" * 64)
+        raccogli.return_value = [candidato]
+
+        esito = esegui_invio_immagine(Mock(), "Destinazione", [], "storico.json")
+
+        self.assertFalse(esito)
+        registra.assert_not_called()
+
+    @patch("whatsapp_bot.registra_invio")
+    @patch("whatsapp_bot.inoltra_messaggio", return_value=True)
+    @patch("whatsapp_bot.raccogli_candidati")
+    def test_registra_solo_dopo_inoltro_confermato(
+        self, raccogli, inoltra, registra
+    ):
+        candidato = CandidatoImmagine("messaggio", "immagine", "f" * 64)
+        raccogli.return_value = [candidato]
+
+        esito = esegui_invio_immagine(Mock(), "Destinazione", [], "storico.json")
+
+        self.assertTrue(esito)
+        registra.assert_called_once_with("storico.json", [], "f" * 64)
 
 
 class StoricoInviiTests(unittest.TestCase):

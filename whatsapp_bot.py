@@ -37,6 +37,15 @@ SELETTORE_RIGHE_MESSAGGIO = (
     '//div[@role="row"][.//div[@data-pre-plain-text] and .//img]'
 )
 SELETTORE_RIGHE_CRONOLOGIA = '//div[@role="row"][.//div[@data-pre-plain-text]]'
+SELETTORE_MENU_CONTESTO_MESSAGGIO = './/span[@data-icon="down-context"]'
+SELETTORE_AZIONE_INOLTRO = (
+    '//div[@aria-label="Inoltra" or @aria-label="Forward message"]'
+)
+SELETTORE_CONFERMA_INOLTRO = '//span[@data-icon="forward"]'
+SELETTORE_RICERCA_DESTINAZIONE = (
+    '//*[@role="textbox" and (@data-tab="6" or @contenteditable)]'
+)
+SELETTORE_PULSANTE_INVIO = '//span[@data-icon="send"]'
 
 
 @dataclass(frozen=True)
@@ -310,57 +319,47 @@ def cerca_e_seleziona_chat(driver, nome_chat):
         return False
 
 
-def inoltra_ultimo_messaggio(driver, destinazione):
-    try:
-        # Trova tutti i contenitori di messaggi nell'area chat aperta
-        messaggi = driver.find_elements(By.XPATH, "//div[@data-pre-plain-text]")
-        if not messaggi:
-            print("Nessun messaggio trovato nella chat.")
-            return
-
-        # Seleziona l'ultimo messaggio (il più recente in basso)
-        ultimo_messaggio = messaggi[-1]
-
-        # Muove il mouse virtuale sopra l'ultimo messaggio per far apparire la freccia del menu
-        webdriver.ActionChains(driver).move_to_element(ultimo_messaggio).perform()
-        time.sleep(1)
-
-        # Clicca sulla frecciatina delle opzioni del messaggio
-        menu_button = ultimo_messaggio.find_element(
-            By.XPATH, './/span[@data-icon="down-context"]'
+def inoltra_messaggio(driver, messaggio, destinazione):
+    webdriver.ActionChains(driver).move_to_element(messaggio).perform()
+    menu = WebDriverWait(messaggio, 10).until(
+        lambda elemento: elemento.find_element(
+            By.XPATH, SELETTORE_MENU_CONTESTO_MESSAGGIO
         )
-        menu_button.click()
-        time.sleep(1)
+    )
+    menu.click()
+    WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_AZIONE_INOLTRO))
+    ).click()
+    WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_CONFERMA_INOLTRO))
+    ).click()
 
-        # Clicca su "Inoltra" (Forward)
-        forward_button = driver.find_element(
-            By.XPATH, '//div[@aria-label="Inoltra" or @aria-label="Forward message"]'
-        )
-        forward_button.click()
-        time.sleep(1)
+    ricerca_destinazione = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_RICERCA_DESTINAZIONE))
+    )
+    ricerca_destinazione.send_keys(destinazione)
+    WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.XPATH, f'//span[@title="{destinazione}"]'))
+    ).click()
+    pulsante_invio = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_PULSANTE_INVIO))
+    )
+    pulsante_invio.click()
+    WebDriverWait(driver, 15).until(EC.staleness_of(pulsante_invio))
+    print(f"Contenuto inoltrato con successo a '{destinazione}'.")
+    return True
 
-        # Clicca sul pulsante di inoltro in basso a destra (l'icona della freccia verso destra)
-        confirm_forward = driver.find_element(By.XPATH, '//span[@data-icon="forward"]')
-        confirm_forward.click()
-        time.sleep(2)
 
-        # Si apre il pannello di ricerca per scegliere a chi inoltrare
-        search_dest = driver.find_element(
-            By.XPATH, '//div[@contenteditable="true"][@data-tab="6"]'
-        )
-        search_dest.send_keys(destinazione)
-        time.sleep(2)
-        search_dest.send_keys(Keys.ENTER)
-        time.sleep(1)
-
-        # Clicca sul tasto verde di invio finale
-        send_button = driver.find_element(By.XPATH, '//span[@data-icon="send"]')
-        send_button.click()
-        print(f"Contenuto inoltrato con successo a '{destinazione}'!")
-        time.sleep(2)
-
-    except Exception as e:
-        print(f"Errore durante la procedura di inoltro: {e}")
+def esegui_invio_immagine(driver, destinazione, storico, percorso_storico):
+    candidati = raccogli_candidati(driver, storico)
+    candidato = scegli_candidato(candidati, storico)
+    if candidato is None:
+        print("Nessuna immagine idonea trovata: nessun invio eseguito.")
+        return False
+    if not inoltra_messaggio(driver, candidato.messaggio, destinazione):
+        return False
+    registra_invio(percorso_storico, storico, candidato.impronta)
+    return True
 
 
 def main():
