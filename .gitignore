@@ -483,3 +483,6 @@ $RECYCLE.BIN/
 
 # Local Git worktrees managed for isolated agent execution
 .worktrees/
+# Stato locale del bot WhatsApp
+storico_invii.json
+storico_invii.json.tmp

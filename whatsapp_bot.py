@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from selenium import webdriver
@@ -15,8 +16,11 @@ from webdriver_manager.chrome import ChromeDriverManager
 GRUPPO_SORGENTE = "Rosario"
 GRUPPO_DESTINAZIONE = "Destinazione"
 
-# Percorso della cartella del profilo creata al Passo 1
-PERCORSO_PROFILO = os.path.join(os.getcwd(), "ProfiloChrome")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PERCORSO_PROFILO = os.path.join(BASE_DIR, "ProfiloChrome")
+PERCORSO_STORICO = os.path.join(BASE_DIR, "storico_invii.json")
+VERSIONE_STORICO = 1
+MAX_STORICO = 7
 
 # WhatsApp Web cambia spesso struttura interna: la ricerca e identificata
 # dall'etichetta accessibile, non dall'ordine o da attributi temporanei.
@@ -26,6 +30,59 @@ SELETTORE_ACCESSO = (
     'normalize-space()="Accedi" or normalize-space()="Log in" '
     'or .//*[normalize-space()="Accedi" or normalize-space()="Log in"]]'
 )
+
+
+def _valida_impronte(impronte):
+    if not isinstance(impronte, list) or len(impronte) > MAX_STORICO:
+        raise ValueError("Lo storico degli invii non valido: dimensione non ammessa.")
+    for impronta in impronte:
+        if (
+            not isinstance(impronta, str)
+            or len(impronta) != 64
+            or any(carattere not in "0123456789abcdef" for carattere in impronta)
+        ):
+            raise ValueError("impronta SHA-256 non valida nello storico.")
+
+
+def carica_storico(percorso):
+    try:
+        with open(percorso, "r", encoding="utf-8") as file:
+            dati = json.load(file)
+    except FileNotFoundError:
+        return []
+    except (json.JSONDecodeError, OSError) as errore:
+        raise ValueError("Lo storico degli invii non valido o non leggibile.") from errore
+
+    if not isinstance(dati, dict) or dati.get("versione") != VERSIONE_STORICO:
+        raise ValueError("Lo storico degli invii non valido: versione non supportata.")
+    impronte = dati.get("ultime_impronte")
+    _valida_impronte(impronte)
+    return list(impronte)
+
+
+def salva_storico(percorso, impronte):
+    _valida_impronte(impronte)
+    percorso_temporaneo = f"{percorso}.tmp"
+    try:
+        with open(percorso_temporaneo, "w", encoding="utf-8") as file:
+            json.dump(
+                {"versione": VERSIONE_STORICO, "ultime_impronte": impronte},
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(percorso_temporaneo, percorso)
+    finally:
+        if os.path.exists(percorso_temporaneo):
+            os.remove(percorso_temporaneo)
+
+
+def registra_invio(percorso, storico, impronta):
+    aggiornato = (list(storico) + [impronta])[-MAX_STORICO:]
+    salva_storico(percorso, aggiornato)
+    return aggiornato
 
 
 def configura_browser():
