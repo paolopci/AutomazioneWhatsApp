@@ -1,6 +1,8 @@
 import json
+import msvcrt
 import os
 import random
+import tempfile
 import time
 from dataclasses import dataclass
 from selenium import webdriver
@@ -25,6 +27,7 @@ GRUPPO_DESTINAZIONE = "Destinazione"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PERCORSO_PROFILO = os.path.join(BASE_DIR, "ProfiloChrome")
 PERCORSO_STORICO = os.path.join(BASE_DIR, "storico_invii.json")
+PERCORSO_LOCK = os.path.join(BASE_DIR, ".whatsapp_bot.lock")
 VERSIONE_STORICO = 1
 MAX_STORICO = 7
 MAX_SCORRIMENTI = 20
@@ -34,9 +37,15 @@ class ErroreSalvataggioStorico(RuntimeError):
     """Segnala che un inoltro confermato non ha aggiornato lo storico locale."""
 
 
+class ErroreIstanzaGiaInEsecuzione(RuntimeError):
+    """Segnala che un'altra istanza del bot possiede già il lock esclusivo."""
+
+
 # WhatsApp Web cambia spesso struttura interna: la ricerca e identificata
 # dall'etichetta accessibile, non dall'ordine o da attributi temporanei.
-SELETTORE_CANDIDATI_RICERCA = '//*[@role="textbox" or @contenteditable or self::input]'
+SELETTORE_CANDIDATI_RICERCA = (
+    '//*[@role="textbox" or @contenteditable="true" or self::input]'
+)
 SELETTORE_ACCESSO = (
     '//*[self::a or self::button]['
     'normalize-space()="Accedi" or normalize-space()="Log in" '
@@ -51,10 +60,14 @@ SELETTORE_AZIONE_INOLTRO = (
     '//div[@aria-label="Inoltra" or @aria-label="Forward message"]'
 )
 SELETTORE_CONFERMA_INOLTRO = '//span[@data-icon="forward"]'
-SELETTORE_RICERCA_DESTINAZIONE = (
-    '//*[@role="textbox" and (@data-tab="6" or @contenteditable)]'
+SELETTORE_DIALOG_INOLTRO = (
+    '//*[@role="dialog" and '
+    './/*[@role="textbox" and @contenteditable="true"]]'
 )
-SELETTORE_PULSANTE_INVIO = '//span[@data-icon="send"]'
+SELETTORE_RICERCA_DESTINAZIONE = (
+    './/*[@role="textbox" and @contenteditable="true"]'
+)
+SELETTORE_PULSANTE_INVIO = './/span[@data-icon="send"]'
 
 
 def crea_literal_xpath(valore):
@@ -69,7 +82,7 @@ def crea_literal_xpath(valore):
 def crea_selettore_destinazione(destinazione):
     # XPath non offre un carattere di escape: il literal deve scegliere o comporre
     # il delimitatore per mantenere la selezione esatta dei nomi chat validi.
-    return f"//span[@title={crea_literal_xpath(destinazione)}]"
+    return f".//span[@title={crea_literal_xpath(destinazione)}]"
 
 
 @dataclass(frozen=True)
@@ -109,10 +122,20 @@ def carica_storico(percorso):
 
 def salva_storico(percorso, impronte):
     _valida_impronte(impronte)
-    percorso_temporaneo = f"{percorso}.tmp"
+    percorso_temporaneo = None
     errore_salvataggio = None
     try:
-        with open(percorso_temporaneo, "w", encoding="utf-8") as file:
+        directory = os.path.dirname(os.path.abspath(percorso))
+        prefisso = f".{os.path.basename(percorso)}."
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=directory,
+            prefix=prefisso,
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            percorso_temporaneo = file.name
             json.dump(
                 {"versione": VERSIONE_STORICO, "ultime_impronte": impronte},
                 file,
@@ -126,7 +149,7 @@ def salva_storico(percorso, impronte):
         errore_salvataggio = errore
     finally:
         try:
-            if os.path.exists(percorso_temporaneo):
+            if percorso_temporaneo and os.path.exists(percorso_temporaneo):
                 os.remove(percorso_temporaneo)
         except OSError as errore:
             if errore_salvataggio is None:
@@ -142,6 +165,39 @@ def registra_invio(percorso, storico, impronta):
     aggiornato = (list(storico) + [impronta])[-MAX_STORICO:]
     salva_storico(percorso, aggiornato)
     return aggiornato
+
+
+def acquisisci_lock_istanza(percorso):
+    try:
+        file_lock = open(percorso, "a+b")
+        file_lock.seek(0, os.SEEK_END)
+        if file_lock.tell() == 0:
+            file_lock.write(b"\0")
+            file_lock.flush()
+        file_lock.seek(0)
+    except OSError as errore:
+        if "file_lock" in locals():
+            file_lock.close()
+        raise RuntimeError(
+            "Impossibile predisporre il lock di esecuzione del bot."
+        ) from errore
+
+    try:
+        msvcrt.locking(file_lock.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as errore:
+        file_lock.close()
+        raise ErroreIstanzaGiaInEsecuzione(
+            "Il bot è già in esecuzione. Attendi la chiusura dell'altra istanza."
+        ) from errore
+    return file_lock
+
+
+def rilascia_lock_istanza(file_lock):
+    try:
+        file_lock.seek(0)
+        msvcrt.locking(file_lock.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        file_lock.close()
 
 
 def calcola_impronta_immagine(driver, immagine):
@@ -237,18 +293,22 @@ def scorri_cronologia_verso_alto(driver):
 
 
 def raccogli_candidati(driver, storico, max_scorrimenti=MAX_SCORRIMENTI):
-    for _ in range(max_scorrimenti + 1):
+    for indice_scansione in range(max_scorrimenti + 1):
         candidati = []
         for messaggio, immagine in trova_immagini_nei_messaggi(driver):
             try:
                 impronta = calcola_impronta_immagine(driver, immagine)
-            except RuntimeError as errore:
+            except (
+                RuntimeError,
+                StaleElementReferenceException,
+                TimeoutException,
+            ) as errore:
                 print(f"Immagine ignorata: {errore}")
                 continue
             candidati.append(CandidatoImmagine(messaggio, immagine, impronta))
         if scegli_candidato(candidati, storico) is not None:
             return candidati
-        if _ == max_scorrimenti:
+        if indice_scansione == max_scorrimenti:
             break
         if not scorri_cronologia_verso_alto(driver):
             break
@@ -358,8 +418,8 @@ def cerca_e_seleziona_chat(driver, nome_chat):
 def inoltra_messaggio(driver, messaggio, destinazione):
     webdriver.ActionChains(driver).move_to_element(messaggio).perform()
     menu = WebDriverWait(messaggio, 10).until(
-        lambda elemento: elemento.find_element(
-            By.XPATH, SELETTORE_MENU_CONTESTO_MESSAGGIO
+        EC.element_to_be_clickable(
+            (By.XPATH, SELETTORE_MENU_CONTESTO_MESSAGGIO)
         )
     )
     menu.click()
@@ -370,20 +430,23 @@ def inoltra_messaggio(driver, messaggio, destinazione):
         EC.element_to_be_clickable((By.XPATH, SELETTORE_CONFERMA_INOLTRO))
     ).click()
 
-    ricerca_destinazione = WebDriverWait(driver, 10).until(
+    dialog_inoltro = WebDriverWait(driver, 10).until(
+        EC.visibility_of_element_located((By.XPATH, SELETTORE_DIALOG_INOLTRO))
+    )
+    ricerca_destinazione = WebDriverWait(dialog_inoltro, 10).until(
         EC.element_to_be_clickable((By.XPATH, SELETTORE_RICERCA_DESTINAZIONE))
     )
     ricerca_destinazione.send_keys(destinazione)
-    WebDriverWait(driver, 10).until(
+    WebDriverWait(dialog_inoltro, 10).until(
         EC.element_to_be_clickable(
             (By.XPATH, crea_selettore_destinazione(destinazione))
         )
     ).click()
-    pulsante_invio = WebDriverWait(driver, 10).until(
+    pulsante_invio = WebDriverWait(dialog_inoltro, 10).until(
         EC.element_to_be_clickable((By.XPATH, SELETTORE_PULSANTE_INVIO))
     )
     pulsante_invio.click()
-    WebDriverWait(driver, 15).until(EC.staleness_of(pulsante_invio))
+    WebDriverWait(driver, 15).until(EC.invisibility_of_element(dialog_inoltro))
     return True
 
 
@@ -401,7 +464,9 @@ def esegui_invio_immagine(driver, destinazione, storico, percorso_storico):
 
 def main():
     driver = None
+    file_lock = None
     try:
+        file_lock = acquisisci_lock_istanza(PERCORSO_LOCK)
         storico = carica_storico(PERCORSO_STORICO)
         driver = configura_browser()
         driver.get("https://whatsapp.com")
@@ -421,6 +486,8 @@ def main():
                 f"Invio eseguito: una nuova immagine da '{GRUPPO_SORGENTE}' "
                 f"è stata inviata a '{GRUPPO_DESTINAZIONE}'."
             )
+    except ErroreIstanzaGiaInEsecuzione as errore:
+        print(f"Avvio non eseguito: {errore}")
     except ErroreSalvataggioStorico as errore:
         print(
             "Invio eseguito, ma lo storico non è stato salvato. "
@@ -430,10 +497,14 @@ def main():
     except (RuntimeError, ValueError, WebDriverException) as errore:
         print(f"Invio non eseguito: {errore}")
     finally:
-        if driver is not None:
-            print("Chiusura del browser tra 5 secondi...")
-            time.sleep(5)
-            driver.quit()
+        try:
+            if driver is not None:
+                print("Chiusura del browser tra 5 secondi...")
+                time.sleep(5)
+                driver.quit()
+        finally:
+            if file_lock is not None:
+                rilascia_lock_istanza(file_lock)
 
 
 if __name__ == "__main__":

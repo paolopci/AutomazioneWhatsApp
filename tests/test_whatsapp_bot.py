@@ -6,8 +6,14 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, call, patch
 
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
 from selenium.webdriver.common.by import By
 
+import whatsapp_bot
 from whatsapp_bot import (
     CandidatoImmagine,
     PERCORSO_STORICO,
@@ -20,6 +26,7 @@ from whatsapp_bot import (
     salva_storico,
     scegli_candidato,
     trova_immagini_nei_messaggi,
+    trova_campo_ricerca_visibile,
     main,
 )
 
@@ -57,6 +64,19 @@ class OrchestrazioneInvioTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def setUp(self):
+        self.lock = Mock(name="lock_istanza")
+        self.acquisisci_lock = patch(
+            "whatsapp_bot.acquisisci_lock_istanza",
+            return_value=self.lock,
+            create=True,
+        ).start()
+        self.rilascia_lock = patch(
+            "whatsapp_bot.rilascia_lock_istanza",
+            create=True,
+        ).start()
+        self.addCleanup(patch.stopall)
+
     @patch("whatsapp_bot.time.sleep")
     @patch("whatsapp_bot.esegui_invio_immagine")
     @patch("whatsapp_bot.cerca_e_seleziona_chat", return_value=True)
@@ -93,7 +113,7 @@ class MainTests(unittest.TestCase):
             "è stata inviata a 'Destinazione'."
         )
         self.assertIn("Conferma UI ricevuta e storico registrato.", messaggi)
-        self.assertIn(messaggio_successo, messaggi)
+        self.assertEqual(1, messaggi.count(messaggio_successo))
         self.assertLess(
             messaggi.index("Conferma UI ricevuta e storico registrato."),
             messaggi.index(messaggio_successo),
@@ -107,6 +127,67 @@ class MainTests(unittest.TestCase):
         )
         sleep.assert_called_once_with(5)
         driver.quit.assert_called_once_with()
+
+    def test_lock_copre_caricamento_inoltro_persistenza_e_chiusura(self):
+        acquisisci = getattr(whatsapp_bot, "acquisisci_lock_istanza", None)
+        rilascia = getattr(whatsapp_bot, "rilascia_lock_istanza", None)
+        self.assertTrue(callable(acquisisci), "Manca acquisisci_lock_istanza")
+        self.assertTrue(callable(rilascia), "Manca rilascia_lock_istanza")
+
+        eventi = []
+        candidato = CandidatoImmagine("messaggio", "immagine", "b" * 64)
+        driver = Mock()
+        driver.quit.side_effect = lambda: eventi.append("chiusura")
+        self.acquisisci_lock.side_effect = lambda _: eventi.append("lock") or self.lock
+        self.rilascia_lock.side_effect = lambda _: eventi.append("release")
+
+        with (
+            patch(
+                "whatsapp_bot.carica_storico",
+                side_effect=lambda _: eventi.append("carica") or [],
+            ),
+            patch("whatsapp_bot.configura_browser", return_value=driver),
+            patch("whatsapp_bot.accedi_a_whatsapp_web"),
+            patch("whatsapp_bot.cerca_e_seleziona_chat", return_value=True),
+            patch(
+                "whatsapp_bot.raccogli_candidati",
+                return_value=[candidato],
+            ),
+            patch(
+                "whatsapp_bot.inoltra_messaggio",
+                side_effect=lambda *_: eventi.append("inoltro") or True,
+            ),
+            patch(
+                "whatsapp_bot.registra_invio",
+                side_effect=lambda *_: eventi.append("persistenza"),
+            ),
+            patch("whatsapp_bot.time.sleep"),
+            redirect_stdout(io.StringIO()),
+        ):
+            main()
+
+        self.assertEqual(
+            ["lock", "carica", "inoltro", "persistenza", "chiusura", "release"],
+            eventi,
+        )
+
+    def test_seconda_istanza_si_ferma_prima_di_caricare_o_inoltrare(self):
+        errore_lock = getattr(whatsapp_bot, "ErroreIstanzaGiaInEsecuzione", None)
+        self.assertIsNotNone(errore_lock, "Manca ErroreIstanzaGiaInEsecuzione")
+        self.acquisisci_lock.side_effect = errore_lock("bot già in esecuzione")
+        output = io.StringIO()
+
+        with (
+            patch("whatsapp_bot.carica_storico") as carica_storico,
+            patch("whatsapp_bot.inoltra_messaggio") as inoltra,
+            redirect_stdout(output),
+        ):
+            main()
+
+        self.assertIn("già in esecuzione", output.getvalue())
+        carica_storico.assert_not_called()
+        inoltra.assert_not_called()
+        self.rilascia_lock.assert_not_called()
 
     def test_avvisa_di_non_riavviare_dopo_invio_senza_storico_persistito(self):
         candidato = CandidatoImmagine("messaggio", "immagine", "a" * 64)
@@ -197,29 +278,56 @@ class SelettoreDestinazioneTests(unittest.TestCase):
         selettore = crea_selettore_destinazione('Destinazione "Sicura"')
 
         self.assertEqual(
-            "//span[@title='Destinazione \"Sicura\"']",
+            ".//span[@title='Destinazione \"Sicura\"']",
             selettore,
+        )
+
+    def test_ricerca_globale_accetta_solo_contenteditable_true(self):
+        driver = Mock()
+        driver.find_elements.return_value = []
+
+        self.assertFalse(trova_campo_ricerca_visibile(driver))
+
+        driver.find_elements.assert_called_once_with(
+            By.XPATH,
+            '//*[@role="textbox" or @contenteditable="true" or self::input]',
         )
 
 
 class InoltroMessaggioTests(unittest.TestCase):
     @patch("whatsapp_bot.webdriver.ActionChains")
-    @patch("whatsapp_bot.EC.staleness_of", return_value="conferma_invio")
+    @patch(
+        "whatsapp_bot.EC.invisibility_of_element",
+        return_value="pannello_chiuso",
+    )
+    @patch(
+        "whatsapp_bot.EC.visibility_of_element_located",
+        return_value="pannello_visibile",
+    )
     @patch("whatsapp_bot.EC.element_to_be_clickable")
     @patch("whatsapp_bot.WebDriverWait")
-    def test_attende_la_conferma_ui_e_seleziona_destinazione_esatta(
-        self, attesa, elemento_cliccabile, staleness_of, action_chains
+    def test_limita_i_controlli_al_pannello_e_attende_la_sua_chiusura(
+        self,
+        attesa,
+        elemento_cliccabile,
+        pannello_visibile,
+        pannello_nascosto,
+        action_chains,
     ):
         driver = Mock()
         messaggio = Mock()
         menu = Mock()
+        azione_inoltro = Mock()
+        conferma_inoltro = Mock()
+        pannello_inoltro = Mock()
         ricerca_destinazione = Mock()
         risultato_destinazione = Mock()
         pulsante_invio = Mock()
         attesa.return_value.until.side_effect = [
             menu,
-            Mock(),
-            Mock(),
+            azione_inoltro,
+            conferma_inoltro,
+            pannello_inoltro,
             ricerca_destinazione,
             risultato_destinazione,
             pulsante_invio,
@@ -238,11 +346,39 @@ class InoltroMessaggioTests(unittest.TestCase):
         risultato_destinazione.click.assert_called_once_with()
         pulsante_invio.click.assert_called_once_with()
         elemento_cliccabile.assert_any_call(
-            (By.XPATH, "//span[@title='Destinazione \"Sicura\"']")
+            (By.XPATH, './/span[@data-icon="down-context"]')
         )
-        staleness_of.assert_called_once_with(pulsante_invio)
-        attesa.return_value.until.assert_any_call("conferma_invio")
-        self.assertEqual(call(driver, 15), attesa.call_args_list[-1])
+        pannello_visibile.assert_called_once_with(
+            (
+                By.XPATH,
+                '//*[@role="dialog" and '
+                './/*[@role="textbox" and @contenteditable="true"]]',
+            )
+        )
+        elemento_cliccabile.assert_any_call(
+            (By.XPATH, './/*[@role="textbox" and @contenteditable="true"]')
+        )
+        elemento_cliccabile.assert_any_call(
+            (By.XPATH, ".//span[@title='Destinazione \"Sicura\"']")
+        )
+        elemento_cliccabile.assert_any_call(
+            (By.XPATH, './/span[@data-icon="send"]')
+        )
+        pannello_nascosto.assert_called_once_with(pannello_inoltro)
+        attesa.return_value.until.assert_any_call("pannello_chiuso")
+        self.assertEqual(
+            [
+                call(messaggio, 10),
+                call(driver, 10),
+                call(driver, 10),
+                call(driver, 10),
+                call(pannello_inoltro, 10),
+                call(pannello_inoltro, 10),
+                call(pannello_inoltro, 10),
+                call(driver, 15),
+            ],
+            attesa.call_args_list,
+        )
 
 
 class StoricoInviiTests(unittest.TestCase):
@@ -260,6 +396,21 @@ class StoricoInviiTests(unittest.TestCase):
         impronte = [f"{indice:064x}" for indice in range(3)]
         salva_storico(self.percorso, impronte)
         self.assertEqual(impronte, carica_storico(self.percorso))
+
+    def test_ogni_salvataggio_usa_un_file_temporaneo_univoco(self):
+        sorgenti_temporanee = []
+        replace_reale = os.replace
+
+        def registra_replace(sorgente, destinazione):
+            sorgenti_temporanee.append(sorgente)
+            replace_reale(sorgente, destinazione)
+
+        with patch("whatsapp_bot.os.replace", side_effect=registra_replace):
+            salva_storico(self.percorso, ["1" * 64])
+            salva_storico(self.percorso, ["2" * 64])
+
+        self.assertEqual(2, len(sorgenti_temporanee))
+        self.assertNotEqual(*sorgenti_temporanee)
 
     def test_registrazione_mantiene_solo_gli_ultimi_sette(self):
         storico = [f"{indice:064x}" for indice in range(7)]
@@ -401,3 +552,63 @@ class RaccoltaCandidatiTests(unittest.TestCase):
     ):
         self.assertEqual([], raccogli_candidati(Mock(), [], max_scorrimenti=20))
         self.assertEqual(20, scorri.call_count)
+
+    @patch("whatsapp_bot.calcola_impronta_immagine")
+    @patch("whatsapp_bot.trova_immagini_nei_messaggi")
+    def test_stale_di_un_candidato_non_blocca_i_successivi(
+        self, trova_immagini, calcola_impronta
+    ):
+        primo = (Mock(), Mock())
+        secondo = (Mock(), Mock())
+        trova_immagini.return_value = [primo, secondo]
+        calcola_impronta.side_effect = [
+            StaleElementReferenceException("candidato stale"),
+            "3" * 64,
+        ]
+
+        with redirect_stdout(io.StringIO()):
+            candidati = raccogli_candidati(Mock(), [], max_scorrimenti=0)
+
+        self.assertEqual(["3" * 64], [candidato.impronta for candidato in candidati])
+        self.assertEqual(2, calcola_impronta.call_count)
+
+    @patch("whatsapp_bot.calcola_impronta_immagine")
+    @patch("whatsapp_bot.trova_immagini_nei_messaggi")
+    def test_timeout_di_un_candidato_non_blocca_i_successivi(
+        self, trova_immagini, calcola_impronta
+    ):
+        primo = (Mock(), Mock())
+        secondo = (Mock(), Mock())
+        trova_immagini.return_value = [primo, secondo]
+        calcola_impronta.side_effect = [TimeoutException("candidato lento"), "4" * 64]
+
+        with redirect_stdout(io.StringIO()):
+            candidati = raccogli_candidati(Mock(), [], max_scorrimenti=0)
+
+        self.assertEqual(["4" * 64], [candidato.impronta for candidato in candidati])
+        self.assertEqual(2, calcola_impronta.call_count)
+
+    @patch("whatsapp_bot.calcola_impronta_immagine")
+    @patch("whatsapp_bot.trova_immagini_nei_messaggi")
+    def test_errore_fatale_della_sessione_non_viene_nascosto(
+        self, trova_immagini, calcola_impronta
+    ):
+        trova_immagini.return_value = [(Mock(), Mock())]
+        calcola_impronta.side_effect = WebDriverException("sessione terminata")
+
+        with self.assertRaisesRegex(WebDriverException, "sessione terminata"):
+            raccogli_candidati(Mock(), [], max_scorrimenti=0)
+
+
+class LockIstanzaTests(unittest.TestCase):
+    def test_contesa_del_lock_restituisce_un_errore_utile(self):
+        acquisisci = getattr(whatsapp_bot, "acquisisci_lock_istanza", None)
+        errore_lock = getattr(whatsapp_bot, "ErroreIstanzaGiaInEsecuzione", None)
+        self.assertTrue(callable(acquisisci), "Manca acquisisci_lock_istanza")
+        self.assertIsNotNone(errore_lock, "Manca ErroreIstanzaGiaInEsecuzione")
+
+        with tempfile.TemporaryDirectory() as directory:
+            percorso = os.path.join(directory, ".whatsapp_bot.lock")
+            with patch("whatsapp_bot.msvcrt.locking", side_effect=OSError("busy")):
+                with self.assertRaisesRegex(errore_lock, "già in esecuzione"):
+                    acquisisci(percorso)
