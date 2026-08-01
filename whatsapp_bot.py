@@ -48,6 +48,21 @@ SELETTORE_RICERCA_DESTINAZIONE = (
 SELETTORE_PULSANTE_INVIO = '//span[@data-icon="send"]'
 
 
+def crea_literal_xpath(valore):
+    if "'" not in valore:
+        return f"'{valore}'"
+    if '"' not in valore:
+        return f'"{valore}"'
+    parti = valore.split("'")
+    return "concat(" + ', "\'", '.join(f"'{parte}'" for parte in parti) + ")"
+
+
+def crea_selettore_destinazione(destinazione):
+    # XPath non offre un carattere di escape: il literal deve scegliere o comporre
+    # il delimitatore per mantenere la selezione esatta dei nomi chat validi.
+    return f"//span[@title={crea_literal_xpath(destinazione)}]"
+
+
 @dataclass(frozen=True)
 class CandidatoImmagine:
     messaggio: object
@@ -339,7 +354,9 @@ def inoltra_messaggio(driver, messaggio, destinazione):
     )
     ricerca_destinazione.send_keys(destinazione)
     WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.XPATH, f'//span[@title="{destinazione}"]'))
+        EC.element_to_be_clickable(
+            (By.XPATH, crea_selettore_destinazione(destinazione))
+        )
     ).click()
     pulsante_invio = WebDriverWait(driver, 10).until(
         EC.element_to_be_clickable((By.XPATH, SELETTORE_PULSANTE_INVIO))

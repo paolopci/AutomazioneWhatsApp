@@ -2,11 +2,14 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
+
+from selenium.webdriver.common.by import By
 
 from whatsapp_bot import (
     CandidatoImmagine,
     carica_storico,
+    crea_selettore_destinazione,
     esegui_invio_immagine,
     inoltra_messaggio,
     registra_invio,
@@ -40,11 +43,63 @@ class OrchestrazioneInvioTests(unittest.TestCase):
     ):
         candidato = CandidatoImmagine("messaggio", "immagine", "f" * 64)
         raccogli.return_value = [candidato]
+        driver = Mock()
 
-        esito = esegui_invio_immagine(Mock(), "Destinazione", [], "storico.json")
+        esito = esegui_invio_immagine(driver, "Destinazione", [], "storico.json")
 
         self.assertTrue(esito)
+        inoltra.assert_called_once_with(driver, candidato.messaggio, "Destinazione")
         registra.assert_called_once_with("storico.json", [], "f" * 64)
+
+
+class SelettoreDestinazioneTests(unittest.TestCase):
+    def test_crea_un_literal_xpath_valido_con_virgolette_doppie(self):
+        selettore = crea_selettore_destinazione('Destinazione "Sicura"')
+
+        self.assertEqual(
+            "//span[@title='Destinazione \"Sicura\"']",
+            selettore,
+        )
+
+
+class InoltroMessaggioTests(unittest.TestCase):
+    @patch("whatsapp_bot.webdriver.ActionChains")
+    @patch("whatsapp_bot.EC.staleness_of", return_value="conferma_invio")
+    @patch("whatsapp_bot.EC.element_to_be_clickable")
+    @patch("whatsapp_bot.WebDriverWait")
+    def test_attende_la_conferma_ui_e_seleziona_destinazione_esatta(
+        self, attesa, elemento_cliccabile, staleness_of, action_chains
+    ):
+        driver = Mock()
+        messaggio = Mock()
+        menu = Mock()
+        ricerca_destinazione = Mock()
+        risultato_destinazione = Mock()
+        pulsante_invio = Mock()
+        attesa.return_value.until.side_effect = [
+            menu,
+            Mock(),
+            Mock(),
+            ricerca_destinazione,
+            risultato_destinazione,
+            pulsante_invio,
+            True,
+        ]
+
+        esito = inoltra_messaggio(driver, messaggio, 'Destinazione "Sicura"')
+
+        self.assertTrue(esito)
+        action_chains.assert_called_once_with(driver)
+        action_chains.return_value.move_to_element.assert_called_once_with(messaggio)
+        ricerca_destinazione.send_keys.assert_called_once_with('Destinazione "Sicura"')
+        risultato_destinazione.click.assert_called_once_with()
+        pulsante_invio.click.assert_called_once_with()
+        elemento_cliccabile.assert_any_call(
+            (By.XPATH, "//span[@title='Destinazione \"Sicura\"']")
+        )
+        staleness_of.assert_called_once_with(pulsante_invio)
+        attesa.return_value.until.assert_any_call("conferma_invio")
+        self.assertEqual(call(driver, 15), attesa.call_args_list[-1])
 
 
 class StoricoInviiTests(unittest.TestCase):
