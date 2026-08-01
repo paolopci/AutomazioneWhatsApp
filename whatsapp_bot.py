@@ -29,6 +29,11 @@ VERSIONE_STORICO = 1
 MAX_STORICO = 7
 MAX_SCORRIMENTI = 20
 
+
+class ErroreSalvataggioStorico(RuntimeError):
+    """Segnala che un inoltro confermato non ha aggiornato lo storico locale."""
+
+
 # WhatsApp Web cambia spesso struttura interna: la ricerca e identificata
 # dall'etichetta accessibile, non dall'ordine o da attributi temporanei.
 SELETTORE_CANDIDATI_RICERCA = '//*[@role="textbox" or @contenteditable or self::input]'
@@ -105,6 +110,7 @@ def carica_storico(percorso):
 def salva_storico(percorso, impronte):
     _valida_impronte(impronte)
     percorso_temporaneo = f"{percorso}.tmp"
+    errore_salvataggio = None
     try:
         with open(percorso_temporaneo, "w", encoding="utf-8") as file:
             json.dump(
@@ -116,9 +122,20 @@ def salva_storico(percorso, impronte):
             file.flush()
             os.fsync(file.fileno())
         os.replace(percorso_temporaneo, percorso)
+    except OSError as errore:
+        errore_salvataggio = errore
     finally:
-        if os.path.exists(percorso_temporaneo):
-            os.remove(percorso_temporaneo)
+        try:
+            if os.path.exists(percorso_temporaneo):
+                os.remove(percorso_temporaneo)
+        except OSError as errore:
+            if errore_salvataggio is None:
+                errore_salvataggio = errore
+
+    if errore_salvataggio is not None:
+        raise ErroreSalvataggioStorico(
+            "Impossibile salvare lo storico degli invii."
+        ) from errore_salvataggio
 
 
 def registra_invio(percorso, storico, impronta):
@@ -367,7 +384,6 @@ def inoltra_messaggio(driver, messaggio, destinazione):
     )
     pulsante_invio.click()
     WebDriverWait(driver, 15).until(EC.staleness_of(pulsante_invio))
-    print(f"Contenuto inoltrato con successo a '{destinazione}'.")
     return True
 
 
@@ -405,6 +421,12 @@ def main():
                 f"Invio eseguito: una nuova immagine da '{GRUPPO_SORGENTE}' "
                 f"è stata inviata a '{GRUPPO_DESTINAZIONE}'."
             )
+    except ErroreSalvataggioStorico as errore:
+        print(
+            "Invio eseguito, ma lo storico non è stato salvato. "
+            "Non avviare nuovamente il bot finché il problema non è risolto. "
+            f"Dettaglio: {errore}"
+        )
     except (RuntimeError, ValueError, WebDriverException) as errore:
         print(f"Invio non eseguito: {errore}")
     finally:

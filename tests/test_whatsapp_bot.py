@@ -88,10 +88,15 @@ class MainTests(unittest.TestCase):
             main()
 
         messaggi = output.getvalue()
+        messaggio_successo = (
+            "Invio eseguito: una nuova immagine da 'Rosario' "
+            "è stata inviata a 'Destinazione'."
+        )
         self.assertIn("Conferma UI ricevuta e storico registrato.", messaggi)
+        self.assertIn(messaggio_successo, messaggi)
         self.assertLess(
             messaggi.index("Conferma UI ricevuta e storico registrato."),
-            messaggi.index("Invio eseguito:"),
+            messaggi.index(messaggio_successo),
         )
         carica_storico.assert_called_once()
         driver.get.assert_called_once_with("https://whatsapp.com")
@@ -101,6 +106,42 @@ class MainTests(unittest.TestCase):
             driver, "Destinazione", storico, PERCORSO_STORICO
         )
         sleep.assert_called_once_with(5)
+        driver.quit.assert_called_once_with()
+
+    def test_avvisa_di_non_riavviare_dopo_invio_senza_storico_persistito(self):
+        candidato = CandidatoImmagine("messaggio", "immagine", "a" * 64)
+        driver = Mock()
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as directory:
+            percorso_storico = os.path.join(directory, "storico_invii.json")
+            with (
+                patch("whatsapp_bot.PERCORSO_STORICO", percorso_storico),
+                patch("whatsapp_bot.configura_browser", return_value=driver),
+                patch("whatsapp_bot.accedi_a_whatsapp_web"),
+                patch("whatsapp_bot.cerca_e_seleziona_chat", return_value=True),
+                patch("whatsapp_bot.raccogli_candidati", return_value=[candidato]),
+                patch("whatsapp_bot.inoltra_messaggio", return_value=True),
+                patch("whatsapp_bot.os.replace", side_effect=OSError("disco pieno")),
+                patch("whatsapp_bot.time.sleep"),
+                redirect_stdout(output),
+            ):
+                main()
+
+        messaggi = output.getvalue()
+        self.assertIn(
+            "Invio eseguito, ma lo storico non è stato salvato.",
+            messaggi,
+        )
+        self.assertIn(
+            "Non avviare nuovamente il bot finché il problema non è risolto.",
+            messaggi,
+        )
+        self.assertNotIn(
+            "Invio eseguito: una nuova immagine da 'Rosario' "
+            "è stata inviata a 'Destinazione'.",
+            messaggi,
+        )
         driver.quit.assert_called_once_with()
 
     @patch("whatsapp_bot.time.sleep")
@@ -184,10 +225,13 @@ class InoltroMessaggioTests(unittest.TestCase):
             pulsante_invio,
             True,
         ]
+        output = io.StringIO()
 
-        esito = inoltra_messaggio(driver, messaggio, 'Destinazione "Sicura"')
+        with redirect_stdout(output):
+            esito = inoltra_messaggio(driver, messaggio, 'Destinazione "Sicura"')
 
         self.assertTrue(esito)
+        self.assertEqual("", output.getvalue())
         action_chains.assert_called_once_with(driver)
         action_chains.return_value.move_to_element.assert_called_once_with(messaggio)
         ricerca_destinazione.send_keys.assert_called_once_with('Destinazione "Sicura"')
