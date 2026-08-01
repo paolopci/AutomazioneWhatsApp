@@ -203,6 +203,8 @@ def raccogli_candidati(driver, storico, max_scorrimenti=MAX_SCORRIMENTI):
             candidati.append(CandidatoImmagine(messaggio, immagine, impronta))
         if scegli_candidato(candidati, storico) is not None:
             return candidati
+        if _ == max_scorrimenti:
+            break
         if not scorri_cronologia_verso_alto(driver):
             break
     return []

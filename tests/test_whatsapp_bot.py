@@ -163,3 +163,11 @@ class RaccoltaCandidatiTests(unittest.TestCase):
     ):
         self.assertEqual([], raccogli_candidati(Mock(), [], max_scorrimenti=20))
         scorri.assert_called_once()
+
+    @patch("whatsapp_bot.scorri_cronologia_verso_alto", return_value=True)
+    @patch("whatsapp_bot.trova_immagini_nei_messaggi", return_value=[])
+    def test_non_supera_il_numero_massimo_di_scorrimenti(
+        self, trova_immagini, scorri
+    ):
+        self.assertEqual([], raccogli_candidati(Mock(), [], max_scorrimenti=20))
+        self.assertEqual(20, scorri.call_count)
