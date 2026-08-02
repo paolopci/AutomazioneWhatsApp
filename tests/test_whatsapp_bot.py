@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, PropertyMock, call, patch
 
 from selenium.common.exceptions import (
     StaleElementReferenceException,
@@ -24,6 +24,7 @@ from whatsapp_bot import (
     registra_invio,
     raccogli_candidati,
     salva_storico,
+    scorri_cronologia_verso_alto,
     scegli_candidato,
     trova_immagini_nei_messaggi,
     trova_campo_ricerca_visibile,
@@ -32,6 +33,37 @@ from whatsapp_bot import (
 
 
 class OrchestrazioneInvioTests(unittest.TestCase):
+    @patch("whatsapp_bot.registra_invio")
+    @patch("whatsapp_bot.inoltra_messaggio", return_value=True)
+    @patch("whatsapp_bot.raccogli_candidati")
+    def test_riacquisisce_il_messaggio_subito_prima_dell_inoltro(
+        self, raccogli, inoltra, registra
+    ):
+        impronta = "d" * 64
+        candidato_iniziale = CandidatoImmagine(
+            "messaggio_obsoleto", "immagine_obsoleta", impronta
+        )
+        candidato_aggiornato = CandidatoImmagine(
+            "messaggio_aggiornato", "immagine_aggiornata", impronta
+        )
+        raccogli.side_effect = [[candidato_iniziale], [candidato_aggiornato]]
+        driver = Mock()
+
+        esito = esegui_invio_immagine(
+            driver,
+            "Destinazione",
+            [],
+            "storico.json",
+        )
+
+        self.assertTrue(esito)
+        inoltra.assert_called_once_with(
+            driver,
+            candidato_aggiornato.messaggio,
+            "Destinazione",
+        )
+        registra.assert_called_once_with("storico.json", [], impronta)
+
     @patch("whatsapp_bot.registra_invio")
     @patch("whatsapp_bot.inoltra_messaggio", return_value=False)
     @patch("whatsapp_bot.raccogli_candidati")
@@ -306,6 +338,122 @@ class InoltroMessaggioTests(unittest.TestCase):
     )
     @patch("whatsapp_bot.EC.element_to_be_clickable")
     @patch("whatsapp_bot.WebDriverWait")
+    def test_usa_il_menu_visibile_se_si_trova_fuori_dal_contenitore(
+        self,
+        attesa,
+        elemento_cliccabile,
+        pannello_visibile,
+        pannello_nascosto,
+        action_chains,
+    ):
+        driver = Mock()
+        messaggio = Mock()
+        messaggio.find_elements.return_value = []
+        menu_globale = Mock()
+        menu_globale.is_displayed.return_value = True
+        menu_globale.is_enabled.return_value = True
+        driver.find_elements.return_value = [menu_globale]
+        azione_inoltro = Mock()
+        conferma_inoltro = Mock()
+        pannello_inoltro = Mock()
+        ricerca_destinazione = Mock()
+        risultato_destinazione = Mock()
+        pulsante_invio = Mock()
+        attesa.return_value.until.side_effect = [
+            azione_inoltro,
+            conferma_inoltro,
+            pannello_inoltro,
+            ricerca_destinazione,
+            risultato_destinazione,
+            pulsante_invio,
+            True,
+        ]
+
+        esito = inoltra_messaggio(driver, messaggio, "Destinazione")
+
+        self.assertTrue(esito)
+        menu_globale.click.assert_called_once_with()
+        action_chains.return_value.context_click.assert_not_called()
+
+    @patch("whatsapp_bot.webdriver.ActionChains")
+    @patch(
+        "whatsapp_bot.EC.invisibility_of_element",
+        return_value="pannello_chiuso",
+    )
+    @patch(
+        "whatsapp_bot.EC.visibility_of_element_located",
+        return_value="pannello_visibile",
+    )
+    @patch("whatsapp_bot.EC.element_to_be_clickable")
+    @patch("whatsapp_bot.WebDriverWait")
+    def test_apre_il_menu_con_click_destro_se_la_freccia_non_esiste(
+        self,
+        attesa,
+        elemento_cliccabile,
+        pannello_visibile,
+        pannello_nascosto,
+        action_chains,
+    ):
+        driver = Mock()
+        driver.find_elements.return_value = []
+        messaggio = Mock()
+        messaggio.find_elements.return_value = []
+        azione_inoltro = Mock()
+        conferma_inoltro = Mock()
+        pannello_inoltro = Mock()
+        ricerca_destinazione = Mock()
+        risultato_destinazione = Mock()
+        pulsante_invio = Mock()
+        attesa.return_value.until.side_effect = [
+            azione_inoltro,
+            conferma_inoltro,
+            pannello_inoltro,
+            ricerca_destinazione,
+            risultato_destinazione,
+            pulsante_invio,
+            True,
+        ]
+
+        esito = inoltra_messaggio(driver, messaggio, "Destinazione")
+
+        self.assertTrue(esito)
+        action_chains.return_value.context_click.assert_called_once_with(messaggio)
+        azione_inoltro.click.assert_called_once_with()
+        elemento_cliccabile.assert_any_call(
+            (
+                By.XPATH,
+                '//*[(@role="button" or @role="menuitem" or '
+                '(self::div and @tabindex="0")) and ('
+                '@aria-label="Inoltra" or @aria-label="Forward message" or '
+                '@aria-label="Forward" or normalize-space(.)="Inoltra" or '
+                'normalize-space(.)="Forward")]',
+            )
+        )
+
+    @patch("whatsapp_bot.webdriver.ActionChains")
+    @patch("whatsapp_bot.WebDriverWait")
+    def test_timeout_indica_la_fase_di_apertura_del_menu(
+        self, attesa, action_chains
+    ):
+        attesa.return_value.until.side_effect = TimeoutException()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "apertura del menu contestuale del messaggio",
+        ):
+            inoltra_messaggio(Mock(), Mock(), "Destinazione")
+
+    @patch("whatsapp_bot.webdriver.ActionChains")
+    @patch(
+        "whatsapp_bot.EC.invisibility_of_element",
+        return_value="pannello_chiuso",
+    )
+    @patch(
+        "whatsapp_bot.EC.visibility_of_element_located",
+        return_value="pannello_visibile",
+    )
+    @patch("whatsapp_bot.EC.element_to_be_clickable")
+    @patch("whatsapp_bot.WebDriverWait")
     def test_limita_i_controlli_al_pannello_e_attende_la_sua_chiusura(
         self,
         attesa,
@@ -488,6 +636,87 @@ class DriverFinto:
         return [immagine.larghezza, immagine.altezza]
 
 
+class ScorrimentoCronologiaTests(unittest.TestCase):
+    @patch("whatsapp_bot.WebDriverWait")
+    def test_usa_il_primo_antenato_con_overflow_verticale_scrollabile(
+        self, attesa
+    ):
+        riga = Mock(name="riga")
+        riga.id = "riga-corrente"
+        antenato_non_scrollabile = Mock(name="contenitore_non_scrollabile")
+        contenitore_scroll = Mock(name="contenitore_scroll")
+        riga.find_element.return_value = antenato_non_scrollabile
+        antenato_non_scrollabile.find_element.return_value = contenitore_scroll
+        driver = Mock()
+        driver.find_elements.return_value = [riga]
+        driver.execute_script.side_effect = [
+            {"scorrevole": False},
+            {"scorrevole": False},
+            {"scorrevole": True},
+            True,
+        ]
+        attesa.return_value.until.return_value = True
+
+        esito = scorri_cronologia_verso_alto(driver)
+
+        self.assertTrue(esito)
+        self.assertIs(
+            contenitore_scroll,
+            driver.execute_script.call_args_list[-1].args[1],
+        )
+
+    @patch("whatsapp_bot.WebDriverWait")
+    def test_usa_una_direzione_negativa_anche_da_scrolltop_zero(
+        self, attesa
+    ):
+        riga = Mock()
+        riga.id = "riga-corrente"
+        driver = Mock()
+        driver.find_elements.return_value = [riga]
+
+        def simula_contenitore_column_reverse(script, elemento, *argomenti):
+            if not argomenti:
+                return {"scorrevole": True}
+            direzione = argomenti[0]
+            posizione_iniziale = 0
+            posizione_finale = posizione_iniziale + direzione * 100
+            return posizione_finale < posizione_iniziale
+
+        driver.execute_script.side_effect = simula_contenitore_column_reverse
+        attesa.return_value.until.return_value = True
+
+        esito = scorri_cronologia_verso_alto(driver)
+
+        self.assertTrue(esito)
+
+    @patch("whatsapp_bot.WebDriverWait")
+    def test_ritrova_la_riga_se_whatsapp_aggiorna_il_dom(
+        self, attesa
+    ):
+        riga_obsoleta = Mock()
+        type(riga_obsoleta).id = PropertyMock(
+            side_effect=StaleElementReferenceException()
+        )
+        riga_aggiornata = Mock()
+        riga_aggiornata.id = "riga-aggiornata"
+        driver = Mock()
+        driver.find_elements.side_effect = [
+            [riga_obsoleta],
+            [riga_aggiornata],
+        ]
+        driver.execute_script.side_effect = [
+            {"scorrevole": True},
+            True,
+        ]
+        attesa.return_value.until.return_value = True
+
+        esito = scorri_cronologia_verso_alto(driver)
+
+        self.assertTrue(esito)
+        self.assertEqual(2, driver.find_elements.call_count)
+        self.assertEqual(2, driver.execute_script.call_count)
+
+
 class ScansioneImmaginiTests(unittest.TestCase):
     def _crea_scenario_con_errore_transitorio(self, fase, errore):
         prima_immagine = Mock(name="prima_immagine")
@@ -606,6 +835,26 @@ class ScansioneImmaginiTests(unittest.TestCase):
 
 
 class RaccoltaCandidatiTests(unittest.TestCase):
+    @patch("whatsapp_bot.calcola_impronta_immagine", return_value="c" * 64)
+    @patch("whatsapp_bot.scorri_cronologia_verso_alto")
+    @patch("whatsapp_bot.trova_immagini_nei_messaggi")
+    def test_prova_la_direzione_opposta_se_la_prima_e_bloccata(
+        self, trova_immagini, scorri, calcola_impronta
+    ):
+        messaggio = Mock()
+        immagine = Mock()
+        trova_immagini.side_effect = [[], [(messaggio, immagine)]]
+        scorri.side_effect = [False, True]
+        driver = Mock()
+
+        candidati = raccogli_candidati(driver, [], max_scorrimenti=20)
+
+        self.assertEqual(["c" * 64], [candidato.impronta for candidato in candidati])
+        self.assertEqual(
+            [call(driver, -1), call(driver, 1)],
+            scorri.call_args_list,
+        )
+
     @patch("whatsapp_bot.calcola_impronta_immagine", return_value="d" * 64)
     @patch("whatsapp_bot.trova_immagini_nei_messaggi")
     def test_ritorna_il_candidato_senza_scorrere_se_idoneo(
@@ -625,8 +874,13 @@ class RaccoltaCandidatiTests(unittest.TestCase):
     def test_interrompe_la_ricerca_se_non_puo_scorrere(
         self, trova_immagini, scorri
     ):
-        self.assertEqual([], raccogli_candidati(Mock(), [], max_scorrimenti=20))
-        scorri.assert_called_once()
+        driver = Mock()
+
+        self.assertEqual([], raccogli_candidati(driver, [], max_scorrimenti=20))
+        self.assertEqual(
+            [call(driver, -1), call(driver, 1)],
+            scorri.call_args_list,
+        )
 
     @patch("whatsapp_bot.scorri_cronologia_verso_alto", return_value=True)
     @patch("whatsapp_bot.trova_immagini_nei_messaggi", return_value=[])

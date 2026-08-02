@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from selenium import webdriver
 from selenium.common.exceptions import (
+    NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
@@ -56,8 +57,18 @@ SELETTORE_RIGHE_MESSAGGIO = (
 )
 SELETTORE_RIGHE_CRONOLOGIA = '//div[@role="row"][.//div[@data-pre-plain-text]]'
 SELETTORE_MENU_CONTESTO_MESSAGGIO = './/span[@data-icon="down-context"]'
+SELETTORE_MENU_CONTESTO_VISIBILE = (
+    '//*[self::button or @role="button"]['
+    '@aria-label="Menu contestuale" or @aria-label="Context menu" or '
+    './/span[@data-icon="down-context" or @data-icon="chevron-down"]]'
+    ' | //span[@data-icon="down-context" or @data-icon="chevron-down"]'
+)
 SELETTORE_AZIONE_INOLTRO = (
-    '//div[@aria-label="Inoltra" or @aria-label="Forward message"]'
+    '//*[(@role="button" or @role="menuitem" or '
+    '(self::div and @tabindex="0")) and ('
+    '@aria-label="Inoltra" or @aria-label="Forward message" or '
+    '@aria-label="Forward" or normalize-space(.)="Inoltra" or '
+    'normalize-space(.)="Forward")]'
 )
 SELETTORE_CONFERMA_INOLTRO = '//span[@data-icon="forward"]'
 SELETTORE_DIALOG_INOLTRO = (
@@ -241,7 +252,12 @@ def scegli_candidato(candidati, storico, scelta=random.choice):
 
 def trova_immagini_nei_messaggi(driver):
     risultati = []
-    for messaggio in driver.find_elements(By.XPATH, SELETTORE_RIGHE_MESSAGGIO):
+    righe_messaggio = driver.find_elements(By.XPATH, SELETTORE_RIGHE_MESSAGGIO)
+    immagini_nascoste = 0
+    sticker = 0
+    immagini_piccole = 0
+
+    for messaggio in righe_messaggio:
         try:
             immagini = messaggio.find_elements(By.XPATH, ".//img")
         except (StaleElementReferenceException, TimeoutException) as errore:
@@ -251,40 +267,92 @@ def trova_immagini_nei_messaggi(driver):
         for immagine in immagini:
             try:
                 if not immagine.is_displayed():
+                    immagini_nascoste += 1
                     continue
                 alt = (immagine.get_attribute("alt") or "").casefold()
                 larghezza, altezza = driver.execute_script(
                     "return [arguments[0].naturalWidth, arguments[0].naturalHeight];",
                     immagine,
                 )
-                if "sticker" in alt or min(larghezza or 0, altezza or 0) < 120:
+                if "sticker" in alt:
+                    sticker += 1
+                    continue
+                if min(larghezza or 0, altezza or 0) < 120:
+                    immagini_piccole += 1
                     continue
             except (StaleElementReferenceException, TimeoutException) as errore:
                 print(f"Immagine ignorata durante la scansione: {errore}")
                 continue
             risultati.append((messaggio, immagine))
+    print(
+        "Scansione immagini: "
+        f"{len(righe_messaggio)} righe, {len(risultati)} idonee, "
+        f"{immagini_nascoste} nascoste, {sticker} sticker, "
+        f"{immagini_piccole} troppo piccole."
+    )
     return risultati
 
 
-def scorri_cronologia_verso_alto(driver):
-    righe = driver.find_elements(By.XPATH, SELETTORE_RIGHE_CRONOLOGIA)
-    if not righe:
-        return False
-    stato_precedente = (righe[0].id, len(righe))
-    spostato = driver.execute_script(
-        """
-        let elemento = arguments[0];
-        while (elemento && elemento.scrollHeight <= elemento.clientHeight) {
-            elemento = elemento.parentElement;
-        }
-        if (!elemento) return false;
-        const prima = elemento.scrollTop;
-        elemento.scrollTop = Math.max(0, prima - elemento.clientHeight * 0.8);
-        return elemento.scrollTop !== prima;
-        """,
-        righe[0],
-    )
+def trova_contenitore_scroll(driver, elemento, max_antenati=15):
+    for _ in range(max_antenati):
+        metriche = driver.execute_script(
+            """
+            const elemento = arguments[0];
+            const stile = window.getComputedStyle(elemento);
+            return {
+                scorrevole:
+                    ['auto', 'scroll', 'overlay'].includes(stile.overflowY) &&
+                    elemento.scrollHeight > elemento.clientHeight
+            };
+            """,
+            elemento,
+        )
+        if metriche.get("scorrevole"):
+            return elemento
+        try:
+            elemento = elemento.find_element(By.XPATH, "..")
+        except NoSuchElementException:
+            return None
+    return None
+
+
+def scorri_cronologia_verso_alto(driver, direzione=-1):
+    for tentativo in range(3):
+        try:
+            righe = driver.find_elements(By.XPATH, SELETTORE_RIGHE_CRONOLOGIA)
+            if not righe:
+                print("Scorrimento interrotto: nessuna riga messaggio trovata.")
+                return False
+            stato_precedente = (righe[0].id, len(righe))
+            contenitore_scroll = trova_contenitore_scroll(driver, righe[0])
+            if contenitore_scroll is None:
+                print(
+                    "Scorrimento interrotto: contenitore verticale "
+                    "scorrevole non trovato."
+                )
+                return False
+            spostato = driver.execute_script(
+                """
+                let elemento = arguments[0];
+                const direzione = arguments[1];
+                const prima = elemento.scrollTop;
+                elemento.scrollTop =
+                    prima + direzione * elemento.clientHeight * 0.8;
+                return elemento.scrollTop !== prima;
+                """,
+                contenitore_scroll,
+                direzione,
+            )
+            break
+        except StaleElementReferenceException:
+            if tentativo == 2:
+                print(
+                    "Scorrimento interrotto: WhatsApp ha aggiornato "
+                    "ripetutamente la cronologia."
+                )
+                return False
     if not spostato:
+        print("Scorrimento interrotto: la cronologia non può salire ulteriormente.")
         return False
 
     def cronologia_cambiata(current_driver):
@@ -293,16 +361,22 @@ def scorri_cronologia_verso_alto(driver):
         )
         if not righe_correnti:
             return False
-        return (righe_correnti[0].id, len(righe_correnti)) != stato_precedente
+        try:
+            return (righe_correnti[0].id, len(righe_correnti)) != stato_precedente
+        except StaleElementReferenceException:
+            return False
 
     try:
         WebDriverWait(driver, 5).until(cronologia_cambiata)
     except TimeoutException:
+        print("Scorrimento interrotto: la cronologia non è cambiata entro 5 secondi.")
         return False
     return True
 
 
 def raccogli_candidati(driver, storico, max_scorrimenti=MAX_SCORRIMENTI):
+    direzione_scroll = -1
+    scorrimenti_eseguiti = 0
     for indice_scansione in range(max_scorrimenti + 1):
         candidati = []
         for messaggio, immagine in trova_immagini_nei_messaggi(driver):
@@ -316,12 +390,22 @@ def raccogli_candidati(driver, storico, max_scorrimenti=MAX_SCORRIMENTI):
                 print(f"Immagine ignorata: {errore}")
                 continue
             candidati.append(CandidatoImmagine(messaggio, immagine, impronta))
+        print(
+            f"Scansione {indice_scansione + 1}/{max_scorrimenti + 1}: "
+            f"{len(candidati)} immagini leggibili."
+        )
         if scegli_candidato(candidati, storico) is not None:
             return candidati
         if indice_scansione == max_scorrimenti:
             break
-        if not scorri_cronologia_verso_alto(driver):
-            break
+        if not scorri_cronologia_verso_alto(driver, direzione_scroll):
+            if scorrimenti_eseguiti > 0 or direzione_scroll == 1:
+                break
+            direzione_scroll = 1
+            print("Prima direzione bloccata: provo la direzione opposta.")
+            if not scorri_cronologia_verso_alto(driver, direzione_scroll):
+                break
+        scorrimenti_eseguiti += 1
     return []
 
 
@@ -425,38 +509,92 @@ def cerca_e_seleziona_chat(driver, nome_chat):
         return False
 
 
+def attendi_fase_inoltro(radice, timeout, condizione, fase):
+    try:
+        return WebDriverWait(radice, timeout).until(condizione)
+    except TimeoutException as errore:
+        raise RuntimeError(f"Timeout durante {fase}.") from errore
+
+
+def trova_menu_contestuale_visibile(driver):
+    for elemento in driver.find_elements(By.XPATH, SELETTORE_MENU_CONTESTO_VISIBILE):
+        try:
+            if elemento.is_displayed() and elemento.is_enabled():
+                return elemento
+        except StaleElementReferenceException:
+            continue
+    return None
+
+
 def inoltra_messaggio(driver, messaggio, destinazione):
     webdriver.ActionChains(driver).move_to_element(messaggio).perform()
-    menu = WebDriverWait(messaggio, 10).until(
-        EC.element_to_be_clickable(
-            (By.XPATH, SELETTORE_MENU_CONTESTO_MESSAGGIO)
-        )
+    menu_disponibili = messaggio.find_elements(
+        By.XPATH,
+        SELETTORE_MENU_CONTESTO_MESSAGGIO,
     )
-    menu.click()
-    WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.XPATH, SELETTORE_AZIONE_INOLTRO))
+    if menu_disponibili:
+        menu = attendi_fase_inoltro(
+            messaggio,
+            10,
+            EC.element_to_be_clickable(
+                (By.XPATH, SELETTORE_MENU_CONTESTO_MESSAGGIO)
+            ),
+            "l'apertura del menu contestuale del messaggio",
+        )
+        menu.click()
+    else:
+        menu_globale = trova_menu_contestuale_visibile(driver)
+        if menu_globale is not None:
+            menu_globale.click()
+        else:
+            webdriver.ActionChains(driver).context_click(messaggio).perform()
+    attendi_fase_inoltro(
+        driver,
+        10,
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_AZIONE_INOLTRO)),
+        "la selezione del comando Inoltra",
     ).click()
-    WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.XPATH, SELETTORE_CONFERMA_INOLTRO))
+    attendi_fase_inoltro(
+        driver,
+        10,
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_CONFERMA_INOLTRO)),
+        "la conferma del messaggio da inoltrare",
     ).click()
 
-    dialog_inoltro = WebDriverWait(driver, 10).until(
-        EC.visibility_of_element_located((By.XPATH, SELETTORE_DIALOG_INOLTRO))
+    dialog_inoltro = attendi_fase_inoltro(
+        driver,
+        10,
+        EC.visibility_of_element_located((By.XPATH, SELETTORE_DIALOG_INOLTRO)),
+        "l'apertura del pannello di inoltro",
     )
-    ricerca_destinazione = WebDriverWait(dialog_inoltro, 10).until(
-        EC.element_to_be_clickable((By.XPATH, SELETTORE_RICERCA_DESTINAZIONE))
+    ricerca_destinazione = attendi_fase_inoltro(
+        dialog_inoltro,
+        10,
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_RICERCA_DESTINAZIONE)),
+        "la ricerca della chat di destinazione",
     )
     ricerca_destinazione.send_keys(destinazione)
-    WebDriverWait(dialog_inoltro, 10).until(
+    attendi_fase_inoltro(
+        dialog_inoltro,
+        10,
         EC.element_to_be_clickable(
             (By.XPATH, crea_selettore_destinazione(destinazione))
-        )
+        ),
+        "la selezione della chat di destinazione",
     ).click()
-    pulsante_invio = WebDriverWait(dialog_inoltro, 10).until(
-        EC.element_to_be_clickable((By.XPATH, SELETTORE_PULSANTE_INVIO))
+    pulsante_invio = attendi_fase_inoltro(
+        dialog_inoltro,
+        10,
+        EC.element_to_be_clickable((By.XPATH, SELETTORE_PULSANTE_INVIO)),
+        "l'attivazione del pulsante di invio",
     )
     pulsante_invio.click()
-    WebDriverWait(driver, 15).until(EC.invisibility_of_element(dialog_inoltro))
+    attendi_fase_inoltro(
+        driver,
+        15,
+        EC.invisibility_of_element(dialog_inoltro),
+        "la conferma conclusiva dell'invio",
+    )
     return True
 
 
@@ -466,7 +604,29 @@ def esegui_invio_immagine(driver, destinazione, storico, percorso_storico):
     if candidato is None:
         print("Nessuna immagine idonea trovata: nessun invio eseguito.")
         return False
-    if not inoltra_messaggio(driver, candidato.messaggio, destinazione):
+
+    # WhatsApp virtualizza la cronologia e può ricreare i nodi DOM durante
+    # il calcolo dell'impronta. Ritrova quindi lo stesso contenuto subito
+    # prima dell'interazione, evitando di usare un WebElement ormai stale.
+    candidati_aggiornati = raccogli_candidati(driver, storico, max_scorrimenti=0)
+    candidato_aggiornato = next(
+        (
+            corrente
+            for corrente in candidati_aggiornati
+            if corrente.impronta == candidato.impronta
+        ),
+        None,
+    )
+    if candidato_aggiornato is None:
+        raise RuntimeError(
+            "L'immagine selezionata non è più disponibile nella vista corrente."
+        )
+
+    if not inoltra_messaggio(
+        driver,
+        candidato_aggiornato.messaggio,
+        destinazione,
+    ):
         return False
     registra_invio(percorso_storico, storico, candidato.impronta)
     return True

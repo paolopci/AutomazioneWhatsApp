@@ -49,6 +49,8 @@ Valida la sintassi con `python -m py_compile whatsapp_bot.py`. Poi esegui un tes
 
 Per errori Selenium, ricostruisci prima l'intero flusso di esecuzione e verifica la presenza di `input()` o altri gate bloccanti prima di modificare i selettori. Usa insieme output del terminale e stato del browser per identificare la fase realmente raggiunta.
 
+Per lo scroll della cronologia WhatsApp, non dedurre il contenitore scorrevole dal solo confronto tra `scrollHeight` e `clientHeight`. Verifica anche `getComputedStyle(elemento).overflowY`, ignora gli antenati non scorrevoli e copri con un test il passaggio al primo antenato con overflow verticale `auto` o `scroll`.
+
 ## 8. Linee Guida per Commit e Pull Request
 
 Git non è inizializzato in questa directory, quindi non è possibile dedurre una convenzione di commit locale. Se Git verrà inizializzato, usa commit concisi all'imperativo, ad esempio `fix: wait for WhatsApp search results`. Nelle pull request descrivi le modifiche ai selettori, il perimetro del test manuale e le assunzioni sull'interfaccia di WhatsApp Web. Non includere mai `ProfiloChrome/`, codici QR, screenshot con chat private o dati personali.
