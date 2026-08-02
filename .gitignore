@@ -487,3 +487,6 @@ $RECYCLE.BIN/
 storico_invii.json
 storico_invii.json.tmp
 .whatsapp_bot.lock
+
+# Profilo Chrome generato a runtime
+ProfiloChrome/
